@@ -260,13 +260,12 @@ impl ReverbClient {
         app_secret: &str,
         auth_endpoint: &str,
         host: &str,
-        port: u16,
         secure: bool,
     ) -> Self {
         Self {
             app_key: app_key.to_string(),
             host: host.to_string(),
-            port,
+            port: if secure { 443 } else { 80 },
             secure,
             auth_endpoint: Option::from(auth_endpoint.to_string()),
             app_secret: Option::from(app_secret.to_string()),
@@ -306,7 +305,20 @@ impl ReverbClient {
 
         info!("Connecting to Laravel Reverb at {}", url);
 
-        let (ws_stream, _) = connect_async(url).await?;
+        let connection_result = connect_async(url).await;
+        let ws_stream = match connection_result {
+            Ok((stream, response)) => {
+                debug!("Connected to WebSocket server. Response: {:?}", response);
+                stream
+            },
+            Err(err) => {
+                error!("Failed to connect to WebSocket server: {}", err);
+                return Err(err.into());
+            }
+        };
+
+        debug!("WebSocket connection established: {:?}", ws_stream);
+
         let (sink, stream) = ws_stream.split();
 
         let (tx, rx) = mpsc::channel::<Message>(100);
