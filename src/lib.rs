@@ -48,32 +48,16 @@ pub enum ReverbError {
     SendError(String),
 }
 
-// Event types
+// Intermediary structure for parsing Pusher/Reverb messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ReverbEvent {
-    ConnectionEstablished {
-        event: String,
-        data: ConnectionData,
-    },
-    SubscriptionSucceeded {
-        event: String,
-        data: String,
-        channel: String,
-    },
-    ChannelEvent {
-        event: String,
-        data: String,
-        channel: String,
-    },
-    Error {
-        event: String,
-        data: ErrorData,
-    },
-    // Other internal event types
-    Unknown(serde_json::Value),
+struct PusherMessage {
+    event: String,
+    data: serde_json::Value, // Using Value to handle both string and object formats
+    #[serde(default)]
+    channel: Option<String>,
 }
 
+// Data structures for the event data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionData {
     socket_id: String,
@@ -369,82 +353,103 @@ impl ReverbClient {
                         Ok(message) => {
                             if let Message::Text(text) = message {
                                 trace!("Received message: {}", text);
+                                debug!("Raw message: {}", text);
 
-                                if let Ok(event) = serde_json::from_str::<ReverbEvent>(&text) {
-                                    match event {
-                                        ReverbEvent::ConnectionEstablished { data, .. } => {
-                                            // Store socket ID
-                                            {
-                                                let mut sid = socket_id.lock().await;
-                                                *sid = Some(data.socket_id.clone());
-                                            }
+                                match serde_json::from_str::<PusherMessage>(&text) {
+                                    Ok(pusher_msg) => {
+                                        match pusher_msg.event.as_str() {
+                                            "pusher:connection_established" => {
+                                                // The data field is a JSON string, not an object
+                                                if let serde_json::Value::String(data_str) = pusher_msg.data {
+                                                    match serde_json::from_str::<ConnectionData>(&data_str) {
+                                                        Ok(conn_data) => {
+                                                            debug!("Connection established with socket ID: {}", conn_data.socket_id);
 
-                                            // Notify handlers
-                                            let socket_id_str = data.socket_id.clone();
+                                                            // Store socket ID
+                                                            {
+                                                                let mut sid = socket_id.lock().await;
+                                                                *sid = Some(conn_data.socket_id.clone());
+                                                            }
 
-                                            // FIXED: Process handlers immediately while holding the lock
-                                            let handlers = event_handlers.lock().await;
-                                            for handler in handlers.iter() {
-                                                handler
-                                                    .on_connection_established(&socket_id_str)
-                                                    .await;
-                                            }
-                                        }
-                                        ReverbEvent::SubscriptionSucceeded { channel, .. } => {
-                                            let channel_str = channel.clone();
+                                                            // Notify handlers
+                                                            let socket_id_str = conn_data.socket_id.clone();
+                                                            let handlers = event_handlers.lock().await;
+                                                            for handler in handlers.iter() {
+                                                                handler
+                                                                    .on_connection_established(&socket_id_str)
+                                                                    .await;
+                                                            }
+                                                        },
+                                                        Err(e) => {
+                                                            error!("Failed to parse connection data: {} - Error: {}", data_str, e);
+                                                        }
+                                                    }
+                                                } else {
+                                                    error!("Connection data is not a string as expected: {:?}", pusher_msg.data);
+                                                }
+                                            },
+                                            "pusher_internal:subscription_succeeded" => {
+                                                if let Some(channel) = pusher_msg.channel {
+                                                    debug!("Subscription succeeded for channel: {}", channel);
 
-                                            // FIXED: Process handlers immediately while holding the lock
-                                            let handlers = event_handlers.lock().await;
-                                            for handler in handlers.iter() {
-                                                handler
-                                                    .on_channel_subscription_succeeded(&channel_str)
-                                                    .await;
-                                            }
-                                        }
-                                        ReverbEvent::ChannelEvent {
-                                            event,
-                                            data,
-                                            channel,
-                                        } => {
-                                            if !event.starts_with("pusher_") {
-                                                let event_str = event.clone();
-                                                let data_str = data.clone();
-                                                let channel_str = channel.clone();
+                                                    let handlers = event_handlers.lock().await;
+                                                    for handler in handlers.iter() {
+                                                        handler
+                                                            .on_channel_subscription_succeeded(&channel)
+                                                            .await;
+                                                    }
+                                                } else {
+                                                    error!("Subscription succeeded without channel information");
+                                                }
+                                            },
+                                            "pusher:error" => {
+                                                match serde_json::from_value::<ErrorData>(pusher_msg.data) {
+                                                    Ok(error_data) => {
+                                                        error!("Reverb error: {} (code: {})", error_data.message, error_data.code);
 
-                                                // FIXED: Process handlers immediately while holding the lock
-                                                let handlers = event_handlers.lock().await;
-                                                for handler in handlers.iter() {
-                                                    handler
-                                                        .on_channel_event(
-                                                            &channel_str,
-                                                            &event_str,
-                                                            &data_str,
-                                                        )
-                                                        .await;
+                                                        let code = error_data.code;
+                                                        let message = error_data.message.clone();
+                                                        let handlers = event_handlers.lock().await;
+                                                        for handler in handlers.iter() {
+                                                            handler.on_error(code, &message).await;
+                                                        }
+                                                    },
+                                                    Err(e) => {
+                                                        error!("Failed to parse error data: {}", e);
+                                                    }
+                                                }
+                                            },
+                                            _ => {
+                                                // Handle channel events (not starting with pusher: or pusher_internal:)
+                                                if !pusher_msg.event.starts_with("pusher:") &&
+                                                    !pusher_msg.event.starts_with("pusher_internal:") {
+                                                    if let Some(channel) = pusher_msg.channel {
+                                                        // Convert data to string if it's not already
+                                                        let data_str = match pusher_msg.data {
+                                                            serde_json::Value::String(s) => s,
+                                                            _ => serde_json::to_string(&pusher_msg.data).unwrap_or_default(),
+                                                        };
+
+                                                        debug!("Channel event: {} on {}", pusher_msg.event, channel);
+
+                                                        let handlers = event_handlers.lock().await;
+                                                        for handler in handlers.iter() {
+                                                            handler
+                                                                .on_channel_event(&channel, &pusher_msg.event, &data_str)
+                                                                .await;
+                                                        }
+                                                    } else {
+                                                        warn!("Channel event received without channel name: {}", pusher_msg.event);
+                                                    }
+                                                } else {
+                                                    debug!("Unhandled pusher event: {}", pusher_msg.event);
                                                 }
                                             }
                                         }
-                                        ReverbEvent::Error { data, .. } => {
-                                            error!(
-                                                "Reverb error: {} (code: {})",
-                                                data.message, data.code
-                                            );
-
-                                            let code = data.code;
-                                            let message = data.message.clone();
-
-                                            // FIXED: Process handlers immediately while holding the lock
-                                            let handlers = event_handlers.lock().await;
-                                            for handler in handlers.iter() {
-                                                handler.on_error(code, &message).await;
-                                            }
-                                        }
-                                        _ => {
-                                            debug!("Unhandled event type: {}", text);
-                                        }
+                                    },
+                                    Err(e) => {
+                                        error!("Failed to parse message: {} - Error: {}", text, e);
                                     }
-                                } else {
-                                    error!("Failed to parse message: {}", text);
                                 }
                             } else if let Message::Ping(data) = message {
                                 debug!("Received ping");
@@ -455,7 +460,7 @@ impl ReverbClient {
                                     error!("Failed to send pong: {}", e);
                                 }
                             }
-                        }
+                        },
                         Err(e) => {
                             error!("WebSocket error: {}", e);
                             break;
