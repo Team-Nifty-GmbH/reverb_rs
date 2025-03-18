@@ -85,7 +85,11 @@ struct ClientEventMessage {
 pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
     fn requires_auth(&self) -> bool;
-    async fn get_auth(&self, socket_id: &str, client: &ReverbClient) -> Result<Option<String>, ReverbError>;
+    async fn get_auth(
+        &self,
+        socket_id: &str,
+        client: &ReverbClient,
+    ) -> Result<Option<String>, ReverbError>;
 }
 
 // Channel implementations
@@ -110,7 +114,11 @@ impl Channel for PrivateChannel {
         true
     }
 
-    async fn get_auth(&self, socket_id: &str, client: &ReverbClient) -> Result<Option<String>, ReverbError> {
+    async fn get_auth(
+        &self,
+        socket_id: &str,
+        client: &ReverbClient,
+    ) -> Result<Option<String>, ReverbError> {
         client.authenticate_channel(socket_id, self.name()).await
     }
 }
@@ -137,8 +145,14 @@ impl Channel for PresenceChannel {
         true
     }
 
-    async fn get_auth(&self, socket_id: &str, client: &ReverbClient) -> Result<Option<String>, ReverbError> {
-        client.authenticate_presence_channel(socket_id, self.name(), &self.user_data).await
+    async fn get_auth(
+        &self,
+        socket_id: &str,
+        client: &ReverbClient,
+    ) -> Result<Option<String>, ReverbError> {
+        client
+            .authenticate_presence_channel(socket_id, self.name(), &self.user_data)
+            .await
     }
 }
 
@@ -163,7 +177,11 @@ impl Channel for PublicChannel {
         false
     }
 
-    async fn get_auth(&self, _socket_id: &str, _client: &ReverbClient) -> Result<Option<String>, ReverbError> {
+    async fn get_auth(
+        &self,
+        _socket_id: &str,
+        _client: &ReverbClient,
+    ) -> Result<Option<String>, ReverbError> {
         Ok(None)
     }
 }
@@ -208,7 +226,13 @@ pub struct ReverbClient {
 }
 
 impl ReverbClient {
-    pub fn new(app_key: &str, app_secret: &str, auth_endpoint: &str, host: &str, secure: bool) -> Self {
+    pub fn new(
+        app_key: &str,
+        app_secret: &str,
+        auth_endpoint: &str,
+        host: &str,
+        secure: bool,
+    ) -> Self {
         Self {
             app_key: app_key.to_string(),
             host: host.to_string(),
@@ -241,16 +265,18 @@ impl ReverbClient {
 
     pub async fn connect(&self) -> Result<(), ReverbError> {
         let scheme = if self.secure { "wss" } else { "ws" };
-        let url = format!("{}://{}:{}/app/{}", scheme, self.host, self.port, self.app_key);
+        let url = format!(
+            "{}://{}:{}/app/{}",
+            scheme, self.host, self.port, self.app_key
+        );
         let url = Url::parse(&url)?;
 
         info!("Connecting to Laravel Reverb at {}", url);
 
-        let (ws_stream, response) = connect_async(url).await
-            .map_err(|e| {
-                error!("Failed to connect to WebSocket server: {}", e);
-                e
-            })?;
+        let (ws_stream, response) = connect_async(url).await.map_err(|e| {
+            error!("Failed to connect to WebSocket server: {}", e);
+            e
+        })?;
 
         debug!("Connected to WebSocket server. Response: {:?}", response);
 
@@ -304,52 +330,80 @@ impl ReverbClient {
                             match pusher_msg.event.as_str() {
                                 "pusher:connection_established" => {
                                     if let serde_json::Value::String(data_str) = &pusher_msg.data {
-                                        if let Ok(conn_data) = serde_json::from_str::<ConnectionData>(data_str) {
-                                            debug!("Connection established with socket ID: {}", conn_data.socket_id);
+                                        if let Ok(conn_data) =
+                                            serde_json::from_str::<ConnectionData>(data_str)
+                                        {
+                                            debug!(
+                                                "Connection established with socket ID: {}",
+                                                conn_data.socket_id
+                                            );
 
                                             // Store socket ID
-                                            *socket_id.lock().await = Some(conn_data.socket_id.clone());
+                                            *socket_id.lock().await =
+                                                Some(conn_data.socket_id.clone());
 
                                             // Notify handlers
                                             for handler in event_handlers.lock().await.iter() {
-                                                handler.on_connection_established(&conn_data.socket_id).await;
+                                                handler
+                                                    .on_connection_established(&conn_data.socket_id)
+                                                    .await;
                                             }
                                         }
                                     }
-                                },
+                                }
                                 "pusher_internal:subscription_succeeded" => {
                                     if let Some(channel) = &pusher_msg.channel {
                                         debug!("Subscription succeeded for channel: {}", channel);
 
                                         for handler in event_handlers.lock().await.iter() {
-                                            handler.on_channel_subscription_succeeded(channel).await;
+                                            handler
+                                                .on_channel_subscription_succeeded(channel)
+                                                .await;
                                         }
                                     }
-                                },
+                                }
                                 "pusher:error" => {
-                                    if let Ok(error_data) = serde_json::from_value::<ErrorData>(pusher_msg.data) {
-                                        error!("Reverb error: {} (code: {})", error_data.message, error_data.code);
+                                    if let Ok(error_data) =
+                                        serde_json::from_value::<ErrorData>(pusher_msg.data)
+                                    {
+                                        error!(
+                                            "Reverb error: {} (code: {})",
+                                            error_data.message, error_data.code
+                                        );
 
                                         for handler in event_handlers.lock().await.iter() {
-                                            handler.on_error(error_data.code, &error_data.message).await;
+                                            handler
+                                                .on_error(error_data.code, &error_data.message)
+                                                .await;
                                         }
                                     }
-                                },
+                                }
                                 _ => {
                                     // Handle channel events
-                                    if !pusher_msg.event.starts_with("pusher:") &&
-                                        !pusher_msg.event.starts_with("pusher_internal:") {
+                                    if !pusher_msg.event.starts_with("pusher:")
+                                        && !pusher_msg.event.starts_with("pusher_internal:")
+                                    {
                                         if let Some(channel) = &pusher_msg.channel {
                                             // Convert data to string
                                             let data_str = match &pusher_msg.data {
                                                 serde_json::Value::String(s) => s.clone(),
-                                                _ => serde_json::to_string(&pusher_msg.data).unwrap_or_default(),
+                                                _ => serde_json::to_string(&pusher_msg.data)
+                                                    .unwrap_or_default(),
                                             };
 
-                                            debug!("Channel event: {} on {}", pusher_msg.event, channel);
+                                            debug!(
+                                                "Channel event: {} on {}",
+                                                pusher_msg.event, channel
+                                            );
 
                                             for handler in event_handlers.lock().await.iter() {
-                                                handler.on_channel_event(channel, &pusher_msg.event, &data_str).await;
+                                                handler
+                                                    .on_channel_event(
+                                                        channel,
+                                                        &pusher_msg.event,
+                                                        &data_str,
+                                                    )
+                                                    .await;
                                             }
                                         }
                                     }
@@ -374,7 +428,10 @@ impl ReverbClient {
     }
 
     pub async fn subscribe<C: Channel>(&self, channel: C) -> Result<(), ReverbError> {
-        let socket_id = self.socket_id.lock().await
+        let socket_id = self
+            .socket_id
+            .lock()
+            .await
             .clone()
             .ok_or_else(|| ReverbError::ConnectionError("Not connected".to_string()))?;
 
@@ -451,9 +508,12 @@ impl ReverbClient {
             Ok(Some(auth))
         } else if let Some(endpoint) = &self.auth_endpoint {
             // Client-side auth using endpoint
-            self.fetch_auth_from_endpoint(endpoint, socket_id, channel, None).await
+            self.fetch_auth_from_endpoint(endpoint, socket_id, channel, None)
+                .await
         } else {
-            Err(ReverbError::AuthError("No authentication method available".to_string()))
+            Err(ReverbError::AuthError(
+                "No authentication method available".to_string(),
+            ))
         }
     }
 
@@ -476,9 +536,12 @@ impl ReverbClient {
             Ok(Some(auth))
         } else if let Some(endpoint) = &self.auth_endpoint {
             // Client-side auth for presence channel
-            self.fetch_auth_from_endpoint(endpoint, socket_id, channel, Some(user_data)).await
+            self.fetch_auth_from_endpoint(endpoint, socket_id, channel, Some(user_data))
+                .await
         } else {
-            Err(ReverbError::AuthError("No authentication method available".to_string()))
+            Err(ReverbError::AuthError(
+                "No authentication method available".to_string(),
+            ))
         }
     }
 
@@ -504,7 +567,9 @@ impl ReverbClient {
                     let start = start + "XSRF-TOKEN=".len();
                     if let Some(end) = cookie_str[start..].find(';') {
                         let token = urlencoding::decode(&cookie_str[start..start + end])
-                            .map_err(|_| ReverbError::AuthError("Failed to decode CSRF token".to_string()))?
+                            .map_err(|_| {
+                                ReverbError::AuthError("Failed to decode CSRF token".to_string())
+                            })?
                             .to_string();
 
                         // Cache the token
@@ -515,7 +580,9 @@ impl ReverbClient {
             }
         }
 
-        Err(ReverbError::AuthError("Failed to get CSRF token".to_string()))
+        Err(ReverbError::AuthError(
+            "Failed to get CSRF token".to_string(),
+        ))
     }
 
     async fn fetch_auth_from_endpoint(
@@ -538,7 +605,8 @@ impl ReverbClient {
         let csrf_token = self.get_csrf_token().await?;
 
         // Send request
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(endpoint)
             .header("X-CSRF-TOKEN", csrf_token)
             .form(&form)
@@ -555,7 +623,10 @@ impl ReverbClient {
             }
         }
 
-        Err(ReverbError::AuthError(format!("Authentication failed: {}", status)))
+        Err(ReverbError::AuthError(format!(
+            "Authentication failed: {}",
+            status
+        )))
     }
 
     pub async fn disconnect(&self) -> Result<(), ReverbError> {
