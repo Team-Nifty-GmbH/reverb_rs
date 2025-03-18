@@ -52,6 +52,7 @@ pub enum ReverbError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PusherMessage {
     event: String,
+    #[serde(default)]
     data: serde_json::Value, // Using Value to handle both string and object formats
     #[serde(default)]
     channel: Option<String>,
@@ -312,6 +313,9 @@ impl ReverbClient {
             _task_handle: self.spawn_ws_tasks(sink, stream, rx),
         });
 
+        // Start the automatic ping interval
+        self.start_ping_interval();
+
         let mut conn_guard = self.connection.lock().await;
         *conn_guard = Some(connection);
 
@@ -364,12 +368,13 @@ impl ReverbClient {
                                                     match serde_json::from_str::<ConnectionData>(&data_str) {
                                                         Ok(conn_data) => {
                                                             debug!("Connection established with socket ID: {}", conn_data.socket_id);
-
                                                             // Store socket ID
                                                             {
                                                                 let mut sid = socket_id.lock().await;
                                                                 *sid = Some(conn_data.socket_id.clone());
                                                             }
+                                                            
+                                                            let socket_id = conn_data.socket_id.clone();
 
                                                             // Notify handlers
                                                             let socket_id_str = conn_data.socket_id.clone();
@@ -704,6 +709,38 @@ impl ReverbClient {
         }
 
         Ok(())
+    }
+
+
+    /// Start a background task that sends a ping message every 30 seconds
+    pub fn start_ping_interval(&self) {
+        let connection = Arc::clone(&self.connection);
+
+        tokio::spawn(async move {
+            let ping_interval = tokio::time::Duration::from_secs(30);
+
+            loop {
+                tokio::time::sleep(ping_interval).await;
+
+                let conn_guard = connection.lock().await;
+                if let Some(conn) = &*conn_guard {
+                    let ping_message = serde_json::json!({
+                    "event": "pusher:ping",
+                    "data": {}
+                });
+
+                    if let Err(e) = conn.send(Message::Text(ping_message.to_string())).await {
+                        error!("Failed to send ping message: {}", e);
+                        break;
+                    }
+
+                    debug!("Ping message sent");
+                } else {
+                    debug!("No active connection to send ping to");
+                    break;
+                }
+            }
+        });
     }
 }
 
