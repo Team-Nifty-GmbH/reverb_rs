@@ -10,10 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpStream;
-use tokio::sync::{
-    mpsc::{self, Receiver},
-    Mutex,
-};
+use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{
     connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
 };
@@ -25,40 +22,32 @@ use url::Url;
 pub enum ReverbError {
     #[error("WebSocket error: {0}")]
     WebSocketError(#[from] tokio_tungstenite::tungstenite::Error),
-
     #[error("URL parse error: {0}")]
     UrlParseError(#[from] url::ParseError),
-
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
-
     #[error("HTTP request error: {0}")]
     HttpError(#[from] reqwest::Error),
-
     #[error("Channel authentication failed: {0}")]
     AuthError(String),
-
     #[error("Connection error: {0}")]
     ConnectionError(String),
-
     #[error("Subscription error: {0}")]
     SubscriptionError(String),
-
     #[error("Send error: {0}")]
     SendError(String),
 }
 
-// Intermediary structure for parsing Pusher/Reverb messages
+// Message structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PusherMessage {
     event: String,
     #[serde(default)]
-    data: serde_json::Value, // Using Value to handle both string and object formats
+    data: serde_json::Value,
     #[serde(default)]
     channel: Option<String>,
 }
 
-// Data structures for the event data
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionData {
     socket_id: String,
@@ -71,40 +60,35 @@ pub struct ErrorData {
     message: String,
 }
 
-// Message types for subscription and events
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeMessage {
+struct SubscribeMessage {
     event: String,
     data: SubscribeData,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeData {
+struct SubscribeData {
     channel: String,
     auth: Option<String>,
     channel_data: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientEventMessage {
+struct ClientEventMessage {
     event: String,
     channel: String,
     data: serde_json::Value,
 }
 
-// Channel trait for defining common channel behavior
+// Channel trait
 #[async_trait]
 pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
     fn requires_auth(&self) -> bool;
-    async fn get_auth(
-        &self,
-        socket_id: &str,
-        client: &ReverbClient,
-    ) -> Result<Option<String>, ReverbError>;
+    async fn get_auth(&self, socket_id: &str, client: &ReverbClient) -> Result<Option<String>, ReverbError>;
 }
 
-// Private channel implementation
+// Channel implementations
 #[derive(Debug, Clone)]
 pub struct PrivateChannel {
     name: String,
@@ -126,16 +110,11 @@ impl Channel for PrivateChannel {
         true
     }
 
-    async fn get_auth(
-        &self,
-        socket_id: &str,
-        client: &ReverbClient,
-    ) -> Result<Option<String>, ReverbError> {
+    async fn get_auth(&self, socket_id: &str, client: &ReverbClient) -> Result<Option<String>, ReverbError> {
         client.authenticate_channel(socket_id, self.name()).await
     }
 }
 
-// Presence channel implementation
 #[derive(Debug, Clone)]
 pub struct PresenceChannel {
     name: String,
@@ -158,18 +137,11 @@ impl Channel for PresenceChannel {
         true
     }
 
-    async fn get_auth(
-        &self,
-        socket_id: &str,
-        client: &ReverbClient,
-    ) -> Result<Option<String>, ReverbError> {
-        client
-            .authenticate_presence_channel(socket_id, self.name(), &self.user_data)
-            .await
+    async fn get_auth(&self, socket_id: &str, client: &ReverbClient) -> Result<Option<String>, ReverbError> {
+        client.authenticate_presence_channel(socket_id, self.name(), &self.user_data).await
     }
 }
 
-// Public channel implementation
 #[derive(Debug, Clone)]
 pub struct PublicChannel {
     name: String,
@@ -191,37 +163,18 @@ impl Channel for PublicChannel {
         false
     }
 
-    async fn get_auth(
-        &self,
-        _socket_id: &str,
-        _client: &ReverbClient,
-    ) -> Result<Option<String>, ReverbError> {
+    async fn get_auth(&self, _socket_id: &str, _client: &ReverbClient) -> Result<Option<String>, ReverbError> {
         Ok(None)
     }
 }
 
-// Event handler trait that users can implement
+// Event handler trait
 #[async_trait]
 pub trait EventHandler: Send + Sync {
     async fn on_connection_established(&self, socket_id: &str);
     async fn on_channel_subscription_succeeded(&self, channel: &str);
     async fn on_channel_event(&self, channel: &str, event: &str, data: &str);
     async fn on_error(&self, code: u32, message: &str);
-}
-
-// The main ReverbClient struct
-pub struct ReverbClient {
-    app_key: String,
-    host: String,
-    port: u16,
-    secure: bool,
-    auth_endpoint: Option<String>,
-    app_secret: Option<String>,
-    socket_id: Arc<Mutex<Option<String>>>,
-    connection: Arc<Mutex<Option<Arc<WebSocketConnection>>>>,
-    event_handlers: Arc<Mutex<Vec<Box<dyn EventHandler>>>>,
-    http_client: HttpClient,
-    csrf_token: Arc<Mutex<Option<String>>>,
 }
 
 // WebSocket connection handler
@@ -239,21 +192,30 @@ impl WebSocketConnection {
     }
 }
 
+// Main client
+pub struct ReverbClient {
+    app_key: String,
+    host: String,
+    port: u16,
+    secure: bool,
+    auth_endpoint: Option<String>,
+    app_secret: Option<String>,
+    socket_id: Arc<Mutex<Option<String>>>,
+    connection: Arc<Mutex<Option<Arc<WebSocketConnection>>>>,
+    event_handlers: Arc<Mutex<Vec<Box<dyn EventHandler>>>>,
+    http_client: HttpClient,
+    csrf_token: Arc<Mutex<Option<String>>>,
+}
+
 impl ReverbClient {
-    pub fn new(
-        app_key: &str,
-        app_secret: &str,
-        auth_endpoint: &str,
-        host: &str,
-        secure: bool,
-    ) -> Self {
+    pub fn new(app_key: &str, app_secret: &str, auth_endpoint: &str, host: &str, secure: bool) -> Self {
         Self {
             app_key: app_key.to_string(),
             host: host.to_string(),
             port: if secure { 443 } else { 80 },
             secure,
-            auth_endpoint: Option::from(auth_endpoint.to_string()),
-            app_secret: Option::from(app_secret.to_string()),
+            auth_endpoint: Some(auth_endpoint.to_string()),
+            app_secret: Some(app_secret.to_string()),
             socket_id: Arc::new(Mutex::new(None)),
             connection: Arc::new(Mutex::new(None)),
             event_handlers: Arc::new(Mutex::new(Vec::new())),
@@ -262,7 +224,6 @@ impl ReverbClient {
         }
     }
 
-    // Set authentication method options
     pub fn with_auth_endpoint(mut self, endpoint: &str) -> Self {
         self.auth_endpoint = Some(endpoint.to_string());
         self
@@ -273,39 +234,27 @@ impl ReverbClient {
         self
     }
 
-    // Register an event handler
     pub async fn add_event_handler<H: EventHandler + 'static>(&self, handler: H) {
         let mut handlers = self.event_handlers.lock().await;
         handlers.push(Box::new(handler));
     }
 
-    // Connect to the WebSocket server
     pub async fn connect(&self) -> Result<(), ReverbError> {
         let scheme = if self.secure { "wss" } else { "ws" };
-        let url = format!(
-            "{}://{}:{}/app/{}",
-            scheme, self.host, self.port, self.app_key
-        );
+        let url = format!("{}://{}:{}/app/{}", scheme, self.host, self.port, self.app_key);
         let url = Url::parse(&url)?;
 
         info!("Connecting to Laravel Reverb at {}", url);
 
-        let connection_result = connect_async(url).await;
-        let ws_stream = match connection_result {
-            Ok((stream, response)) => {
-                debug!("Connected to WebSocket server. Response: {:?}", response);
-                stream
-            },
-            Err(err) => {
-                error!("Failed to connect to WebSocket server: {}", err);
-                return Err(err.into());
-            }
-        };
+        let (ws_stream, response) = connect_async(url).await
+            .map_err(|e| {
+                error!("Failed to connect to WebSocket server: {}", e);
+                e
+            })?;
 
-        debug!("WebSocket connection established: {:?}", ws_stream);
+        debug!("Connected to WebSocket server. Response: {:?}", response);
 
         let (sink, stream) = ws_stream.split();
-
         let (tx, rx) = mpsc::channel::<Message>(100);
 
         let connection = Arc::new(WebSocketConnection {
@@ -313,7 +262,7 @@ impl ReverbClient {
             _task_handle: self.spawn_ws_tasks(sink, stream, rx),
         });
 
-        // Start the automatic ping interval
+        // Start ping interval for keepalive
         self.start_ping_interval();
 
         let mut conn_guard = self.connection.lock().await;
@@ -322,153 +271,95 @@ impl ReverbClient {
         Ok(())
     }
 
-    // Spawn tasks to handle WebSocket communication
     fn spawn_ws_tasks(
         &self,
         sink: futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
         mut stream: futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-        mut rx: Receiver<Message>,
+        mut rx: mpsc::Receiver<Message>,
     ) -> tokio::task::JoinHandle<()> {
-        // Clone these for our tasks
         let event_handlers = Arc::clone(&self.event_handlers);
         let socket_id = Arc::clone(&self.socket_id);
-
-        // Create thread-safe wrappers for the sink
         let sink = Arc::new(Mutex::new(sink));
 
         tokio::spawn(async move {
-            // Task for sending messages to the WebSocket
+            // Task for sending messages
             let sink_clone = Arc::clone(&sink);
             let send_task = tokio::spawn(async move {
                 while let Some(message) = rx.recv().await {
-                    let mut sink = sink_clone.lock().await;
-                    if let Err(e) = sink.send(message).await {
+                    if let Err(e) = sink_clone.lock().await.send(message).await {
                         error!("Error sending message: {}", e);
                         break;
                     }
                 }
             });
 
-            // Task for receiving messages from the WebSocket
+            // Task for receiving messages
             let sink_clone = Arc::clone(&sink);
             let receive_task = tokio::spawn(async move {
-                while let Some(message_result) = stream.next().await {
-                    match message_result {
-                        Ok(message) => {
-                            if let Message::Text(text) = message {
-                                trace!("Received message: {}", text);
-                                debug!("Raw message: {}", text);
+                while let Some(Ok(message)) = stream.next().await {
+                    if let Message::Text(text) = message {
+                        trace!("Received message: {}", text);
 
-                                match serde_json::from_str::<PusherMessage>(&text) {
-                                    Ok(pusher_msg) => {
-                                        match pusher_msg.event.as_str() {
-                                            "pusher:connection_established" => {
-                                                // The data field is a JSON string, not an object
-                                                if let serde_json::Value::String(data_str) = pusher_msg.data {
-                                                    match serde_json::from_str::<ConnectionData>(&data_str) {
-                                                        Ok(conn_data) => {
-                                                            debug!("Connection established with socket ID: {}", conn_data.socket_id);
-                                                            // Store socket ID
-                                                            {
-                                                                let mut sid = socket_id.lock().await;
-                                                                *sid = Some(conn_data.socket_id.clone());
-                                                            }
-                                                            
-                                                            let socket_id = conn_data.socket_id.clone();
+                        if let Ok(pusher_msg) = serde_json::from_str::<PusherMessage>(&text) {
+                            match pusher_msg.event.as_str() {
+                                "pusher:connection_established" => {
+                                    if let serde_json::Value::String(data_str) = &pusher_msg.data {
+                                        if let Ok(conn_data) = serde_json::from_str::<ConnectionData>(data_str) {
+                                            debug!("Connection established with socket ID: {}", conn_data.socket_id);
 
-                                                            // Notify handlers
-                                                            let socket_id_str = conn_data.socket_id.clone();
-                                                            let handlers = event_handlers.lock().await;
-                                                            for handler in handlers.iter() {
-                                                                handler
-                                                                    .on_connection_established(&socket_id_str)
-                                                                    .await;
-                                                            }
-                                                        },
-                                                        Err(e) => {
-                                                            error!("Failed to parse connection data: {} - Error: {}", data_str, e);
-                                                        }
-                                                    }
-                                                } else {
-                                                    error!("Connection data is not a string as expected: {:?}", pusher_msg.data);
-                                                }
-                                            },
-                                            "pusher_internal:subscription_succeeded" => {
-                                                if let Some(channel) = pusher_msg.channel {
-                                                    debug!("Subscription succeeded for channel: {}", channel);
+                                            // Store socket ID
+                                            *socket_id.lock().await = Some(conn_data.socket_id.clone());
 
-                                                    let handlers = event_handlers.lock().await;
-                                                    for handler in handlers.iter() {
-                                                        handler
-                                                            .on_channel_subscription_succeeded(&channel)
-                                                            .await;
-                                                    }
-                                                } else {
-                                                    error!("Subscription succeeded without channel information");
-                                                }
-                                            },
-                                            "pusher:error" => {
-                                                match serde_json::from_value::<ErrorData>(pusher_msg.data) {
-                                                    Ok(error_data) => {
-                                                        error!("Reverb error: {} (code: {})", error_data.message, error_data.code);
-
-                                                        let code = error_data.code;
-                                                        let message = error_data.message.clone();
-                                                        let handlers = event_handlers.lock().await;
-                                                        for handler in handlers.iter() {
-                                                            handler.on_error(code, &message).await;
-                                                        }
-                                                    },
-                                                    Err(e) => {
-                                                        error!("Failed to parse error data: {}", e);
-                                                    }
-                                                }
-                                            },
-                                            _ => {
-                                                // Handle channel events (not starting with pusher: or pusher_internal:)
-                                                if !pusher_msg.event.starts_with("pusher:") &&
-                                                    !pusher_msg.event.starts_with("pusher_internal:") {
-                                                    if let Some(channel) = pusher_msg.channel {
-                                                        // Convert data to string if it's not already
-                                                        let data_str = match pusher_msg.data {
-                                                            serde_json::Value::String(s) => s,
-                                                            _ => serde_json::to_string(&pusher_msg.data).unwrap_or_default(),
-                                                        };
-
-                                                        debug!("Channel event: {} on {}", pusher_msg.event, channel);
-
-                                                        let handlers = event_handlers.lock().await;
-                                                        for handler in handlers.iter() {
-                                                            handler
-                                                                .on_channel_event(&channel, &pusher_msg.event, &data_str)
-                                                                .await;
-                                                        }
-                                                    } else {
-                                                        warn!("Channel event received without channel name: {}", pusher_msg.event);
-                                                    }
-                                                } else {
-                                                    debug!("Unhandled pusher event: {}", pusher_msg.event);
-                                                }
+                                            // Notify handlers
+                                            for handler in event_handlers.lock().await.iter() {
+                                                handler.on_connection_established(&conn_data.socket_id).await;
                                             }
                                         }
-                                    },
-                                    Err(e) => {
-                                        error!("Failed to parse message: {} - Error: {}", text, e);
+                                    }
+                                },
+                                "pusher_internal:subscription_succeeded" => {
+                                    if let Some(channel) = &pusher_msg.channel {
+                                        debug!("Subscription succeeded for channel: {}", channel);
+
+                                        for handler in event_handlers.lock().await.iter() {
+                                            handler.on_channel_subscription_succeeded(channel).await;
+                                        }
+                                    }
+                                },
+                                "pusher:error" => {
+                                    if let Ok(error_data) = serde_json::from_value::<ErrorData>(pusher_msg.data) {
+                                        error!("Reverb error: {} (code: {})", error_data.message, error_data.code);
+
+                                        for handler in event_handlers.lock().await.iter() {
+                                            handler.on_error(error_data.code, &error_data.message).await;
+                                        }
+                                    }
+                                },
+                                _ => {
+                                    // Handle channel events
+                                    if !pusher_msg.event.starts_with("pusher:") &&
+                                        !pusher_msg.event.starts_with("pusher_internal:") {
+                                        if let Some(channel) = &pusher_msg.channel {
+                                            // Convert data to string
+                                            let data_str = match &pusher_msg.data {
+                                                serde_json::Value::String(s) => s.clone(),
+                                                _ => serde_json::to_string(&pusher_msg.data).unwrap_or_default(),
+                                            };
+
+                                            debug!("Channel event: {} on {}", pusher_msg.event, channel);
+
+                                            for handler in event_handlers.lock().await.iter() {
+                                                handler.on_channel_event(channel, &pusher_msg.event, &data_str).await;
+                                            }
+                                        }
                                     }
                                 }
-                            } else if let Message::Ping(data) = message {
-                                debug!("Received ping");
-                                // Respond with pong
-                                let data_clone = data.clone();
-                                let mut sink = sink_clone.lock().await;
-                                if let Err(e) = sink.send(Message::Pong(data_clone)).await {
-                                    error!("Failed to send pong: {}", e);
-                                }
                             }
-                        },
-                        Err(e) => {
-                            error!("WebSocket error: {}", e);
-                            break;
+                        }
+                    } else if let Message::Ping(data) = message {
+                        // Respond with pong
+                        if let Err(e) = sink_clone.lock().await.send(Message::Pong(data)).await {
+                            error!("Failed to send pong: {}", e);
                         }
                     }
                 }
@@ -476,25 +367,16 @@ impl ReverbClient {
 
             // Wait for either task to complete
             tokio::select! {
-                _ = send_task => {
-                    warn!("Send task completed");
-                },
-                _ = receive_task => {
-                    warn!("Receive task completed");
-                }
+                _ = send_task => warn!("Send task completed"),
+                _ = receive_task => warn!("Receive task completed")
             }
         })
     }
 
-    // Subscribe to a channel
     pub async fn subscribe<C: Channel>(&self, channel: C) -> Result<(), ReverbError> {
-        let socket_id = {
-            let guard = self.socket_id.lock().await;
-            match &*guard {
-                Some(id) => id.clone(),
-                None => return Err(ReverbError::ConnectionError("Not connected".to_string())),
-            }
-        };
+        let socket_id = self.socket_id.lock().await
+            .clone()
+            .ok_or_else(|| ReverbError::ConnectionError("Not connected".to_string()))?;
 
         let auth = if channel.requires_auth() {
             channel.get_auth(&socket_id, self).await?
@@ -507,14 +389,13 @@ impl ReverbClient {
             data: SubscribeData {
                 channel: channel.name().to_string(),
                 auth,
-                channel_data: None, // This would be set for presence channels
+                channel_data: None,
             },
         };
 
         let json = serde_json::to_string(&subscribe_message)?;
 
-        let conn_guard = self.connection.lock().await;
-        match &*conn_guard {
+        match &*self.connection.lock().await {
             Some(connection) => {
                 connection.send(Message::Text(json)).await?;
                 Ok(())
@@ -523,14 +404,12 @@ impl ReverbClient {
         }
     }
 
-    // Send a client event to a channel
     pub async fn trigger_event(
         &self,
         channel: &str,
         event: &str,
         data: serde_json::Value,
     ) -> Result<(), ReverbError> {
-        // Ensure event name is prefixed with 'client-'
         let event_name = if !event.starts_with("client-") {
             format!("client-{}", event)
         } else {
@@ -545,8 +424,7 @@ impl ReverbClient {
 
         let json = serde_json::to_string(&message)?;
 
-        let conn_guard = self.connection.lock().await;
-        match &*conn_guard {
+        match &*self.connection.lock().await {
             Some(connection) => {
                 connection.send(Message::Text(json)).await?;
                 Ok(())
@@ -555,32 +433,30 @@ impl ReverbClient {
         }
     }
 
-    // Authenticate a channel using app secret (server-side auth)
     async fn authenticate_channel(
         &self,
         socket_id: &str,
         channel: &str,
     ) -> Result<Option<String>, ReverbError> {
         if let Some(secret) = &self.app_secret {
+            // Server-side auth using HMAC
             let signature = format!("{}:{}", socket_id, channel);
             let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
                 .map_err(|_| ReverbError::AuthError("HMAC creation failed".to_string()))?;
+
             mac.update(signature.as_bytes());
             let result = mac.finalize().into_bytes();
             let auth = format!("{}:{}", self.app_key, hex::encode(result));
 
             Ok(Some(auth))
         } else if let Some(endpoint) = &self.auth_endpoint {
-            self.fetch_auth_from_endpoint(endpoint, socket_id, channel, None)
-                .await
+            // Client-side auth using endpoint
+            self.fetch_auth_from_endpoint(endpoint, socket_id, channel, None).await
         } else {
-            Err(ReverbError::AuthError(
-                "No authentication method available".to_string(),
-            ))
+            Err(ReverbError::AuthError("No authentication method available".to_string()))
         }
     }
 
-    // Authenticate a presence channel
     async fn authenticate_presence_channel(
         &self,
         socket_id: &str,
@@ -588,71 +464,60 @@ impl ReverbClient {
         user_data: &str,
     ) -> Result<Option<String>, ReverbError> {
         if let Some(secret) = &self.app_secret {
+            // Server-side auth for presence channel
             let signature = format!("{}:{}:{}", socket_id, channel, user_data);
             let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
                 .map_err(|_| ReverbError::AuthError("HMAC creation failed".to_string()))?;
+
             mac.update(signature.as_bytes());
             let result = mac.finalize().into_bytes();
             let auth = format!("{}:{}", self.app_key, hex::encode(result));
 
             Ok(Some(auth))
         } else if let Some(endpoint) = &self.auth_endpoint {
-            self.fetch_auth_from_endpoint(endpoint, socket_id, channel, Some(user_data))
-                .await
+            // Client-side auth for presence channel
+            self.fetch_auth_from_endpoint(endpoint, socket_id, channel, Some(user_data)).await
         } else {
-            Err(ReverbError::AuthError(
-                "No authentication method available".to_string(),
-            ))
+            Err(ReverbError::AuthError("No authentication method available".to_string()))
         }
     }
 
-    // Get CSRF token for Laravel authentication
     async fn get_csrf_token(&self) -> Result<String, ReverbError> {
-        // First check if we already have a token
-        {
-            let token = self.csrf_token.lock().await;
-            if let Some(token) = token.as_ref() {
-                return Ok(token.clone());
-            }
+        // Return cached token if available
+        if let Some(token) = self.csrf_token.lock().await.clone() {
+            return Ok(token);
         }
 
-        // Fetch the token
+        // Fetch new token
         let endpoint = if self.secure {
-            format!("https://{}:{}/sanctum/csrf-cookie", self.host, self.port)
+            format!("https://{}:{}/broadcasting/auth", self.host, self.port)
         } else {
-            format!("http://{}:{}/sanctum/csrf-cookie", self.host, self.port)
+            format!("http://{}:{}/broadcasting/auth", self.host, self.port)
         };
 
         let response = self.http_client.get(&endpoint).send().await?;
 
-        // Extract the XSRF-TOKEN from cookies
+        // Extract XSRF-TOKEN from cookies
         if let Some(cookie_header) = response.headers().get("set-cookie") {
             if let Ok(cookie_str) = cookie_header.to_str() {
                 if let Some(start) = cookie_str.find("XSRF-TOKEN=") {
                     let start = start + "XSRF-TOKEN=".len();
                     if let Some(end) = cookie_str[start..].find(';') {
                         let token = urlencoding::decode(&cookie_str[start..start + end])
-                            .map_err(|_| {
-                                ReverbError::AuthError("Failed to decode CSRF token".to_string())
-                            })?
+                            .map_err(|_| ReverbError::AuthError("Failed to decode CSRF token".to_string()))?
                             .to_string();
 
-                        // Save the token
-                        let mut token_guard = self.csrf_token.lock().await;
-                        *token_guard = Some(token.clone());
-
+                        // Cache the token
+                        *self.csrf_token.lock().await = Some(token.clone());
                         return Ok(token);
                     }
                 }
             }
         }
 
-        Err(ReverbError::AuthError(
-            "Failed to get CSRF token".to_string(),
-        ))
+        Err(ReverbError::AuthError("Failed to get CSRF token".to_string()))
     }
 
-    // Fetch authentication token from the auth endpoint
     async fn fetch_auth_from_endpoint(
         &self,
         endpoint: &str,
@@ -660,7 +525,7 @@ impl ReverbClient {
         channel: &str,
         channel_data: Option<&str>,
     ) -> Result<Option<String>, ReverbError> {
-        // Prepare the request payload
+        // Prepare request payload
         let mut form = HashMap::new();
         form.insert("socket_id", socket_id);
         form.insert("channel_name", channel);
@@ -669,12 +534,11 @@ impl ReverbClient {
             form.insert("channel_data", data);
         }
 
-        // Get CSRF token if needed
+        // Get CSRF token
         let csrf_token = self.get_csrf_token().await?;
 
-        // Send the request
-        let response = self
-            .http_client
+        // Send request
+        let response = self.http_client
             .post(endpoint)
             .header("X-CSRF-TOKEN", csrf_token)
             .form(&form)
@@ -691,18 +555,12 @@ impl ReverbClient {
             }
         }
 
-        Err(ReverbError::AuthError(format!(
-            "Authentication failed: {}",
-            status
-        )))
+        Err(ReverbError::AuthError(format!("Authentication failed: {}", status)))
     }
 
-    // Close the WebSocket connection
     pub async fn disconnect(&self) -> Result<(), ReverbError> {
-        let mut conn_guard = self.connection.lock().await;
-
-        if let Some(connection) = conn_guard.take() {
-            // Send a close frame
+        if let Some(connection) = self.connection.lock().await.take() {
+            // Send close frame
             if let Err(e) = connection.send(Message::Close(None)).await {
                 warn!("Error sending close frame: {}", e);
             }
@@ -711,8 +569,6 @@ impl ReverbClient {
         Ok(())
     }
 
-
-    /// Start a background task that sends a ping message every 30 seconds
     pub fn start_ping_interval(&self) {
         let connection = Arc::clone(&self.connection);
 
@@ -725,9 +581,9 @@ impl ReverbClient {
                 let conn_guard = connection.lock().await;
                 if let Some(conn) = &*conn_guard {
                     let ping_message = serde_json::json!({
-                    "event": "pusher:ping",
-                    "data": {}
-                });
+                        "event": "pusher:ping",
+                        "data": {}
+                    });
 
                     if let Err(e) = conn.send(Message::Text(ping_message.to_string())).await {
                         error!("Failed to send ping message: {}", e);
@@ -744,7 +600,7 @@ impl ReverbClient {
     }
 }
 
-// Helper functions to create channel instances
+// Helper functions
 pub fn private_channel(name: &str) -> PrivateChannel {
     let name = if !name.starts_with("private-") {
         format!("private-{}", name)
