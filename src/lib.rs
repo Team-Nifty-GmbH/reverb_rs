@@ -90,6 +90,7 @@ pub trait Channel: Send + Sync {
         socket_id: &str,
         client: &ReverbClient,
     ) -> Result<Option<String>, ReverbError>;
+    fn get_channel_data(&self) -> Option<String>;
 }
 
 // Channel implementations
@@ -120,6 +121,10 @@ impl Channel for PrivateChannel {
         client: &ReverbClient,
     ) -> Result<Option<String>, ReverbError> {
         client.authenticate_channel(socket_id, self.name()).await
+    }
+
+    fn get_channel_data(&self) -> Option<String> {
+        None
     }
 }
 
@@ -154,6 +159,10 @@ impl Channel for PresenceChannel {
             .authenticate_presence_channel(socket_id, self.name(), &self.user_data)
             .await
     }
+
+    fn get_channel_data(&self) -> Option<String> {
+        Some(self.user_data.clone())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +192,10 @@ impl Channel for PublicChannel {
         _client: &ReverbClient,
     ) -> Result<Option<String>, ReverbError> {
         Ok(None)
+    }
+
+    fn get_channel_data(&self) -> Option<String> {
+        None
     }
 }
 
@@ -441,16 +454,38 @@ impl ReverbClient {
             None
         };
 
+        // Get channel_data from the channel (for presence channels)
+        let channel_data = channel.get_channel_data();
+
         let subscribe_message = SubscribeMessage {
             event: "pusher:subscribe".to_string(),
             data: SubscribeData {
                 channel: channel.name().to_string(),
                 auth,
-                channel_data: None,
+                channel_data,
             },
         };
 
         let json = serde_json::to_string(&subscribe_message)?;
+
+        match &*self.connection.lock().await {
+            Some(connection) => {
+                connection.send(Message::Text(json)).await?;
+                Ok(())
+            }
+            None => Err(ReverbError::ConnectionError("Not connected".to_string())),
+        }
+    }
+
+    pub async fn unsubscribe(&self, channel_name: &str) -> Result<(), ReverbError> {
+        let unsubscribe_message = serde_json::json!({
+            "event": "pusher:unsubscribe",
+            "data": {
+                "channel": channel_name
+            }
+        });
+
+        let json = serde_json::to_string(&unsubscribe_message)?;
 
         match &*self.connection.lock().await {
             Some(connection) => {
@@ -497,12 +532,14 @@ impl ReverbClient {
     ) -> Result<Option<String>, ReverbError> {
         if let Some(secret) = &self.app_secret {
             // Server-side auth using HMAC
+            // Format: socket_id:channel_name
             let signature = format!("{}:{}", socket_id, channel);
             let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
                 .map_err(|_| ReverbError::AuthError("HMAC creation failed".to_string()))?;
 
             mac.update(signature.as_bytes());
             let result = mac.finalize().into_bytes();
+            // Auth format: app_key:hex_encoded_hmac
             let auth = format!("{}:{}", self.app_key, hex::encode(result));
 
             Ok(Some(auth))
@@ -525,12 +562,14 @@ impl ReverbClient {
     ) -> Result<Option<String>, ReverbError> {
         if let Some(secret) = &self.app_secret {
             // Server-side auth for presence channel
+            // Format: socket_id:channel_name:channel_data
             let signature = format!("{}:{}:{}", socket_id, channel, user_data);
             let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
                 .map_err(|_| ReverbError::AuthError("HMAC creation failed".to_string()))?;
 
             mac.update(signature.as_bytes());
             let result = mac.finalize().into_bytes();
+            // Auth format: app_key:hex_encoded_hmac
             let auth = format!("{}:{}", self.app_key, hex::encode(result));
 
             Ok(Some(auth))
