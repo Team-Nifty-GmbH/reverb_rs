@@ -60,8 +60,8 @@ mod message;
 
 // Public re-exports
 pub use channel::{
-    presence_channel, private_channel, public_channel, Channel, PresenceChannel, PrivateChannel,
-    PublicChannel,
+    Channel, PresenceChannel, PrivateChannel, PublicChannel, presence_channel, private_channel,
+    public_channel,
 };
 pub use client::ReverbClient;
 pub use error::ReverbError;

@@ -1,6 +1,6 @@
+use crate::error::ReverbError;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::protocol::Message;
-use crate::error::ReverbError;
 
 /// WebSocket connection handler
 pub(crate) struct WebSocketConnection {

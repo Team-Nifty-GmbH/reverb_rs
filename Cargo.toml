@@ -3,7 +3,10 @@ name = "reverb-rs"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "A Rust library for interacting with the Reverb API"
+description = "A Rust client library for Laravel Reverb WebSocket server"
+repository = "https://github.com/Team-Nifty-GmbH/reverb_rs"
+keywords = ["websocket", "laravel", "reverb", "pusher", "realtime"]
+categories = ["network-programming", "web-programming"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -20,4 +23,3 @@ thiserror = "2.0"
 tracing = "0.1"
 async-trait = "0.1"
 urlencoding = "2"
-log = "0.4"

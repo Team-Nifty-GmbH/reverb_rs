@@ -5,9 +5,9 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::{
-    connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
 use tracing::{debug, error, info, trace, warn};
 use url::Url;
@@ -145,8 +145,8 @@ impl ReverbClient {
                         if let Ok(pusher_msg) = serde_json::from_str::<PusherMessage>(&text) {
                             match pusher_msg.event.as_str() {
                                 "pusher:connection_established" => {
-                                    if let serde_json::Value::String(data_str) = &pusher_msg.data {
-                                        if let Ok(conn_data) =
+                                    if let serde_json::Value::String(data_str) = &pusher_msg.data
+                                        && let Ok(conn_data) =
                                             serde_json::from_str::<ConnectionData>(data_str)
                                         {
                                             debug!(
@@ -163,7 +163,6 @@ impl ReverbClient {
                                                     .await;
                                             }
                                         }
-                                    }
                                 }
                                 "pusher_internal:subscription_succeeded" => {
                                     if let Some(channel) = &pusher_msg.channel {
@@ -195,8 +194,7 @@ impl ReverbClient {
                                 _ => {
                                     if !pusher_msg.event.starts_with("pusher:")
                                         && !pusher_msg.event.starts_with("pusher_internal:")
-                                    {
-                                        if let Some(channel) = &pusher_msg.channel {
+                                        && let Some(channel) = &pusher_msg.channel {
                                             let data_str = match &pusher_msg.data {
                                                 serde_json::Value::String(s) => s.clone(),
                                                 _ => serde_json::to_string(&pusher_msg.data)
@@ -218,15 +216,13 @@ impl ReverbClient {
                                                     .await;
                                             }
                                         }
-                                    }
                                 }
                             }
                         }
-                    } else if let Message::Ping(data) = message {
-                        if let Err(e) = sink_clone.lock().await.send(Message::Pong(data)).await {
+                    } else if let Message::Ping(data) = message
+                        && let Err(e) = sink_clone.lock().await.send(Message::Pong(data)).await {
                             error!("Failed to send pong: {}", e);
                         }
-                    }
                 }
             });
 
@@ -397,9 +393,9 @@ impl ReverbClient {
 
         let response = self.http_client.get(&endpoint).send().await?;
 
-        if let Some(cookie_header) = response.headers().get("set-cookie") {
-            if let Ok(cookie_str) = cookie_header.to_str() {
-                if let Some(start) = cookie_str.find("XSRF-TOKEN=") {
+        if let Some(cookie_header) = response.headers().get("set-cookie")
+            && let Ok(cookie_str) = cookie_header.to_str()
+                && let Some(start) = cookie_str.find("XSRF-TOKEN=") {
                     let start = start + "XSRF-TOKEN=".len();
                     if let Some(end) = cookie_str[start..].find(';') {
                         let token = urlencoding::decode(&cookie_str[start..start + end])
@@ -412,8 +408,6 @@ impl ReverbClient {
                         return Ok(token);
                     }
                 }
-            }
-        }
 
         Err(ReverbError::AuthError(
             "Failed to get CSRF token".to_string(),
@@ -464,11 +458,10 @@ impl ReverbClient {
 
     /// Disconnect from the server
     pub async fn disconnect(&self) -> Result<(), ReverbError> {
-        if let Some(connection) = self.connection.lock().await.take() {
-            if let Err(e) = connection.send(Message::Close(None)).await {
+        if let Some(connection) = self.connection.lock().await.take()
+            && let Err(e) = connection.send(Message::Close(None)).await {
                 warn!("Error sending close frame: {}", e);
             }
-        }
 
         Ok(())
     }

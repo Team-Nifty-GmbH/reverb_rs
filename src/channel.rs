@@ -1,6 +1,6 @@
-use async_trait::async_trait;
-use crate::error::ReverbError;
 use crate::client::ReverbClient;
+use crate::error::ReverbError;
+use async_trait::async_trait;
 
 /// Channel trait defining common channel behavior
 #[async_trait]

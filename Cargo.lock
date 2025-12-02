@@ -976,7 +976,6 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
- "log",
  "reqwest",
  "serde",
  "serde_json",
