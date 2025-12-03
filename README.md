@@ -8,6 +8,7 @@ A Rust client library for [Laravel Reverb](https://reverb.laravel.com/) WebSocke
 - **Authentication**: Server-side HMAC authentication and client-side endpoint authentication
 - **Event Handling**: Async trait-based event handlers for flexible event processing
 - **Automatic Keepalive**: Built-in ping interval (30s) to maintain connection
+- **Automatic Reconnection**: Detect disconnections with `wait_for_disconnect()` for easy reconnection logic
 - **TLS Support**: Secure WebSocket connections via `wss://`
 
 ## Installation
@@ -24,13 +25,21 @@ reverb-rs = { git = "https://github.com/Team-Nifty-GmbH/reverb_rs" }
 ```rust
 use reverb_rs::{ReverbClient, EventHandler, private_channel};
 use async_trait::async_trait;
+use std::sync::Arc;
 
-struct MyHandler;
+struct MyHandler {
+    client: Arc<ReverbClient>,
+}
 
 #[async_trait]
 impl EventHandler for MyHandler {
     async fn on_connection_established(&self, socket_id: &str) {
         println!("Connected with socket ID: {}", socket_id);
+
+        // Subscribe to channels after connection is established
+        if let Err(e) = self.client.subscribe(private_channel("my-channel")).await {
+            eprintln!("Failed to subscribe: {}", e);
+        }
     }
 
     async fn on_channel_subscription_succeeded(&self, channel: &str) {
@@ -48,23 +57,33 @@ impl EventHandler for MyHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ReverbClient::new(
-        "your-app-key",
-        "your-app-secret",
-        "https://your-app.com/broadcasting/auth",
-        "your-reverb-host.com",
-        true, // use TLS (wss://)
-    );
-
-    client.add_event_handler(MyHandler).await;
-    client.connect().await?;
-
-    // Subscribe to a private channel
-    client.subscribe(private_channel("my-channel")).await?;
-
-    // Keep the connection alive
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        let client = Arc::new(ReverbClient::new(
+            "your-app-key",
+            "your-app-secret",
+            "https://your-app.com/broadcasting/auth",
+            "your-reverb-host.com",
+            true, // use TLS (wss://)
+        ));
+
+        let handler = MyHandler { client: client.clone() };
+        client.add_event_handler(handler).await;
+
+        match client.connect().await {
+            Ok(_) => {
+                println!("Connected to Reverb");
+                // Wait until the connection is closed
+                client.wait_for_disconnect().await;
+                println!("Connection lost");
+            }
+            Err(e) => {
+                eprintln!("Failed to connect: {}", e);
+            }
+        }
+
+        // Wait before reconnecting
+        println!("Reconnecting in 5 seconds...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 }
 ```
@@ -155,7 +174,30 @@ client.trigger_event(
 client.unsubscribe("private-my-channel").await?;
 ```
 
-## Disconnecting
+## Connection Management
+
+### Waiting for Disconnection
+
+Use `wait_for_disconnect()` to block until the connection is closed (by server or network failure). This is useful for implementing reconnection logic:
+
+```rust
+loop {
+    let client = Arc::new(ReverbClient::new(/* ... */));
+    client.add_event_handler(handler).await;
+
+    if client.connect().await.is_ok() {
+        // Block until disconnection
+        client.wait_for_disconnect().await;
+        println!("Connection lost, reconnecting...");
+    }
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+}
+```
+
+### Disconnecting
+
+Gracefully close the connection:
 
 ```rust
 client.disconnect().await?;

@@ -466,6 +466,36 @@ impl ReverbClient {
         Ok(())
     }
 
+    /// Wait for the WebSocket connection to disconnect
+    /// Returns when the connection is closed (either by server or network failure)
+    pub async fn wait_for_disconnect(&self) {
+        // Get the connection and wait for its task to complete
+        let connection = {
+            let guard = self.connection.lock().await;
+            guard.as_ref().map(Arc::clone)
+        };
+
+        if let Some(conn) = connection {
+            // Wait for the task handle to complete
+            // We need to take ownership, so we'll poll until disconnect is detected
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+                // Check if connection is still alive by trying to get it
+                let guard = self.connection.lock().await;
+                if guard.is_none() {
+                    break;
+                }
+
+                // Check if the sender is closed (indicates connection died)
+                if conn.socket.is_closed() {
+                    info!("WebSocket connection closed");
+                    break;
+                }
+            }
+        }
+    }
+
     /// Start ping interval for keepalive
     pub fn start_ping_interval(&self) {
         let connection = Arc::clone(&self.connection);
