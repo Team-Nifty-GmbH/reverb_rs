@@ -4,8 +4,10 @@ use reqwest::Client as HttpClient;
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
@@ -33,6 +35,10 @@ pub struct ReverbClient {
     event_handlers: Arc<Mutex<Vec<Box<dyn EventHandler>>>>,
     http_client: HttpClient,
     csrf_token: Arc<Mutex<Option<String>>>,
+    disconnect_notify: Arc<Notify>,
+    is_connected: Arc<AtomicBool>,
+    /// Timestamp of last pong received (seconds since UNIX epoch)
+    last_pong_at: Arc<AtomicU64>,
 }
 
 impl ReverbClient {
@@ -56,6 +62,9 @@ impl ReverbClient {
             event_handlers: Arc::new(Mutex::new(Vec::new())),
             http_client: HttpClient::new(),
             csrf_token: Arc::new(Mutex::new(None)),
+            disconnect_notify: Arc::new(Notify::new()),
+            is_connected: Arc::new(AtomicBool::new(false)),
+            last_pong_at: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -106,6 +115,14 @@ impl ReverbClient {
         // Start ping interval for keepalive
         self.start_ping_interval();
 
+        // Initialize last pong timestamp to now
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.last_pong_at.store(now, Ordering::SeqCst);
+
+        self.is_connected.store(true, Ordering::SeqCst);
         let mut conn_guard = self.connection.lock().await;
         *conn_guard = Some(connection);
 
@@ -122,6 +139,10 @@ impl ReverbClient {
         let event_handlers = Arc::clone(&self.event_handlers);
         let socket_id = Arc::clone(&self.socket_id);
         let sink = Arc::new(Mutex::new(sink));
+        let disconnect_notify = Arc::clone(&self.disconnect_notify);
+        let is_connected = Arc::clone(&self.is_connected);
+        let connection = Arc::clone(&self.connection);
+        let last_pong_at = Arc::clone(&self.last_pong_at);
 
         tokio::spawn(async move {
             // Task for sending messages
@@ -148,21 +169,20 @@ impl ReverbClient {
                                     if let serde_json::Value::String(data_str) = &pusher_msg.data
                                         && let Ok(conn_data) =
                                             serde_json::from_str::<ConnectionData>(data_str)
-                                        {
-                                            debug!(
-                                                "Connection established with socket ID: {}",
-                                                conn_data.socket_id
-                                            );
+                                    {
+                                        debug!(
+                                            "Connection established with socket ID: {}",
+                                            conn_data.socket_id
+                                        );
 
-                                            *socket_id.lock().await =
-                                                Some(conn_data.socket_id.clone());
+                                        *socket_id.lock().await = Some(conn_data.socket_id.clone());
 
-                                            for handler in event_handlers.lock().await.iter() {
-                                                handler
-                                                    .on_connection_established(&conn_data.socket_id)
-                                                    .await;
-                                            }
+                                        for handler in event_handlers.lock().await.iter() {
+                                            handler
+                                                .on_connection_established(&conn_data.socket_id)
+                                                .await;
                                         }
+                                    }
                                 }
                                 "pusher_internal:subscription_succeeded" => {
                                     if let Some(channel) = &pusher_msg.channel {
@@ -191,38 +211,49 @@ impl ReverbClient {
                                         }
                                     }
                                 }
+                                "pusher:pong" => {
+                                    // Update last pong timestamp
+                                    let now = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    last_pong_at.store(now, Ordering::SeqCst);
+                                    debug!("Pong received");
+                                }
                                 _ => {
                                     if !pusher_msg.event.starts_with("pusher:")
                                         && !pusher_msg.event.starts_with("pusher_internal:")
-                                        && let Some(channel) = &pusher_msg.channel {
-                                            let data_str = match &pusher_msg.data {
-                                                serde_json::Value::String(s) => s.clone(),
-                                                _ => serde_json::to_string(&pusher_msg.data)
-                                                    .unwrap_or_default(),
-                                            };
+                                        && let Some(channel) = &pusher_msg.channel
+                                    {
+                                        let data_str = match &pusher_msg.data {
+                                            serde_json::Value::String(s) => s.clone(),
+                                            _ => serde_json::to_string(&pusher_msg.data)
+                                                .unwrap_or_default(),
+                                        };
 
-                                            debug!(
-                                                "Channel event: {} on {}",
-                                                pusher_msg.event, channel
-                                            );
+                                        debug!(
+                                            "Channel event: {} on {}",
+                                            pusher_msg.event, channel
+                                        );
 
-                                            for handler in event_handlers.lock().await.iter() {
-                                                handler
-                                                    .on_channel_event(
-                                                        channel,
-                                                        &pusher_msg.event,
-                                                        &data_str,
-                                                    )
-                                                    .await;
-                                            }
+                                        for handler in event_handlers.lock().await.iter() {
+                                            handler
+                                                .on_channel_event(
+                                                    channel,
+                                                    &pusher_msg.event,
+                                                    &data_str,
+                                                )
+                                                .await;
                                         }
+                                    }
                                 }
                             }
                         }
                     } else if let Message::Ping(data) = message
-                        && let Err(e) = sink_clone.lock().await.send(Message::Pong(data)).await {
-                            error!("Failed to send pong: {}", e);
-                        }
+                        && let Err(e) = sink_clone.lock().await.send(Message::Pong(data)).await
+                    {
+                        error!("Failed to send pong: {}", e);
+                    }
                 }
             });
 
@@ -230,6 +261,11 @@ impl ReverbClient {
                 _ = send_task => warn!("Send task completed"),
                 _ = receive_task => warn!("Receive task completed")
             }
+
+            // Signal disconnection
+            is_connected.store(false, Ordering::SeqCst);
+            connection.lock().await.take();
+            disconnect_notify.notify_waiters();
         })
     }
 
@@ -395,19 +431,18 @@ impl ReverbClient {
 
         if let Some(cookie_header) = response.headers().get("set-cookie")
             && let Ok(cookie_str) = cookie_header.to_str()
-                && let Some(start) = cookie_str.find("XSRF-TOKEN=") {
-                    let start = start + "XSRF-TOKEN=".len();
-                    if let Some(end) = cookie_str[start..].find(';') {
-                        let token = urlencoding::decode(&cookie_str[start..start + end])
-                            .map_err(|_| {
-                                ReverbError::AuthError("Failed to decode CSRF token".to_string())
-                            })?
-                            .to_string();
+            && let Some(start) = cookie_str.find("XSRF-TOKEN=")
+        {
+            let start = start + "XSRF-TOKEN=".len();
+            if let Some(end) = cookie_str[start..].find(';') {
+                let token = urlencoding::decode(&cookie_str[start..start + end])
+                    .map_err(|_| ReverbError::AuthError("Failed to decode CSRF token".to_string()))?
+                    .to_string();
 
-                        *self.csrf_token.lock().await = Some(token.clone());
-                        return Ok(token);
-                    }
-                }
+                *self.csrf_token.lock().await = Some(token.clone());
+                return Ok(token);
+            }
+        }
 
         Err(ReverbError::AuthError(
             "Failed to get CSRF token".to_string(),
@@ -459,9 +494,10 @@ impl ReverbClient {
     /// Disconnect from the server
     pub async fn disconnect(&self) -> Result<(), ReverbError> {
         if let Some(connection) = self.connection.lock().await.take()
-            && let Err(e) = connection.send(Message::Close(None)).await {
-                warn!("Error sending close frame: {}", e);
-            }
+            && let Err(e) = connection.send(Message::Close(None)).await
+        {
+            warn!("Error sending close frame: {}", e);
+        }
 
         Ok(())
     }
@@ -469,42 +505,55 @@ impl ReverbClient {
     /// Wait for the WebSocket connection to disconnect
     /// Returns when the connection is closed (either by server or network failure)
     pub async fn wait_for_disconnect(&self) {
-        // Get the connection and wait for its task to complete
-        let connection = {
-            let guard = self.connection.lock().await;
-            guard.as_ref().map(Arc::clone)
-        };
-
-        if let Some(conn) = connection {
-            // Wait for the task handle to complete
-            // We need to take ownership, so we'll poll until disconnect is detected
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-                // Check if connection is still alive by trying to get it
-                let guard = self.connection.lock().await;
-                if guard.is_none() {
-                    break;
-                }
-
-                // Check if the sender is closed (indicates connection died)
-                if conn.socket.is_closed() {
-                    info!("WebSocket connection closed");
-                    break;
-                }
-            }
+        // If not connected, return immediately
+        if !self.is_connected.load(Ordering::SeqCst) {
+            return;
         }
+
+        // Wait for the disconnect notification
+        self.disconnect_notify.notified().await;
+        info!("WebSocket connection closed");
     }
 
     /// Start ping interval for keepalive
     pub fn start_ping_interval(&self) {
         let connection = Arc::clone(&self.connection);
+        let is_connected = Arc::clone(&self.is_connected);
+        let disconnect_notify = Arc::clone(&self.disconnect_notify);
+        let last_pong_at = Arc::clone(&self.last_pong_at);
 
         tokio::spawn(async move {
             let ping_interval = tokio::time::Duration::from_secs(30);
+            // If we haven't received a pong in 90 seconds (3 ping intervals), consider connection dead
+            let pong_timeout_secs: u64 = 90;
 
             loop {
                 tokio::time::sleep(ping_interval).await;
+
+                // Check if still connected
+                if !is_connected.load(Ordering::SeqCst) {
+                    debug!("Connection already closed, stopping ping task");
+                    break;
+                }
+
+                // Check for pong timeout
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let last_pong = last_pong_at.load(Ordering::SeqCst);
+
+                if now - last_pong > pong_timeout_secs {
+                    warn!(
+                        "Pong timeout detected (last pong {}s ago), connection likely dead",
+                        now - last_pong
+                    );
+                    // Signal disconnect on pong timeout
+                    is_connected.store(false, Ordering::SeqCst);
+                    connection.lock().await.take();
+                    disconnect_notify.notify_waiters();
+                    break;
+                }
 
                 let conn_guard = connection.lock().await;
                 if let Some(conn) = &*conn_guard {
@@ -515,6 +564,11 @@ impl ReverbClient {
 
                     if let Err(e) = conn.send(Message::Text(ping_message.to_string())).await {
                         error!("Failed to send ping message: {}", e);
+                        // Signal disconnect on ping failure
+                        drop(conn_guard);
+                        is_connected.store(false, Ordering::SeqCst);
+                        connection.lock().await.take();
+                        disconnect_notify.notify_waiters();
                         break;
                     }
 
