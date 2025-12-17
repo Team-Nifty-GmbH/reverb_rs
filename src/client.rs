@@ -542,11 +542,12 @@ impl ReverbClient {
                     .unwrap_or_default()
                     .as_secs();
                 let last_pong = last_pong_at.load(Ordering::SeqCst);
+                let seconds_since_pong = now - last_pong;
 
-                if now - last_pong > pong_timeout_secs {
+                if seconds_since_pong > pong_timeout_secs {
                     warn!(
                         "Pong timeout detected (last pong {}s ago), connection likely dead",
-                        now - last_pong
+                        seconds_since_pong
                     );
                     // Signal disconnect on pong timeout
                     is_connected.store(false, Ordering::SeqCst);
@@ -572,7 +573,7 @@ impl ReverbClient {
                         break;
                     }
 
-                    debug!("Ping message sent");
+                    debug!("Ping sent (last pong {}s ago)", seconds_since_pong);
                 } else {
                     debug!("No active connection to send ping to");
                     break;
