@@ -89,16 +89,21 @@ impl ReverbClient {
     /// Connect to the Reverb WebSocket server
     pub async fn connect(&self) -> Result<(), ReverbError> {
         let scheme = if self.secure { "wss" } else { "ws" };
-        let url = format!(
-            "{}://{}:{}/app/{}",
-            scheme, self.host, self.port, self.app_key
-        );
+        // Omit port when it's the default (443 for wss, 80 for ws) to avoid 301 redirects
+        let url = if (self.secure && self.port == 443) || (!self.secure && self.port == 80) {
+            format!("{}://{}/app/{}", scheme, self.host, self.app_key)
+        } else {
+            format!(
+                "{}://{}:{}/app/{}",
+                scheme, self.host, self.port, self.app_key
+            )
+        };
         let url = Url::parse(&url)?;
 
         info!("Connecting to Laravel Reverb at {}", url);
 
-        let (ws_stream, response) = connect_async(url).await.map_err(|e| {
-            error!("Failed to connect to WebSocket server: {}", e);
+        let (ws_stream, response) = connect_async(url.clone()).await.map_err(|e| {
+            error!("Failed to connect to WebSocket server at {}: {}", url, e);
             e
         })?;
 
