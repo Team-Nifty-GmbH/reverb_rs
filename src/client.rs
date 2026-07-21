@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Client as HttpClient;
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -102,7 +102,7 @@ impl ReverbClient {
 
         info!("Connecting to Laravel Reverb at {}", url);
 
-        let (ws_stream, response) = connect_async(url.clone()).await.map_err(|e| {
+        let (ws_stream, response) = connect_async(url.as_str()).await.map_err(|e| {
             error!("Failed to connect to WebSocket server at {}: {}", url, e);
             e
         })?;
@@ -304,7 +304,7 @@ impl ReverbClient {
 
         match &*self.connection.lock().await {
             Some(connection) => {
-                connection.send(Message::Text(json)).await?;
+                connection.send(Message::Text(json.into())).await?;
                 Ok(())
             }
             None => Err(ReverbError::ConnectionError("Not connected".to_string())),
@@ -324,7 +324,7 @@ impl ReverbClient {
 
         match &*self.connection.lock().await {
             Some(connection) => {
-                connection.send(Message::Text(json)).await?;
+                connection.send(Message::Text(json.into())).await?;
                 Ok(())
             }
             None => Err(ReverbError::ConnectionError("Not connected".to_string())),
@@ -354,7 +354,7 @@ impl ReverbClient {
 
         match &*self.connection.lock().await {
             Some(connection) => {
-                connection.send(Message::Text(json)).await?;
+                connection.send(Message::Text(json.into())).await?;
                 Ok(())
             }
             None => Err(ReverbError::ConnectionError("Not connected".to_string())),
@@ -568,7 +568,10 @@ impl ReverbClient {
                         "data": {}
                     });
 
-                    if let Err(e) = conn.send(Message::Text(ping_message.to_string())).await {
+                    if let Err(e) = conn
+                        .send(Message::Text(ping_message.to_string().into()))
+                        .await
+                    {
                         error!("Failed to send ping message: {}", e);
                         // Signal disconnect on ping failure
                         drop(conn_guard);
